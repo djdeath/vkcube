@@ -12,10 +12,13 @@
 
 #include <xcb/xcb.h>
 
+#include <X11/Xlib.h>
+
 #include <wayland-client.h>
 #include <xdg-shell-unstable-v6-client-protocol.h>
 
 #define VK_USE_PLATFORM_XCB_KHR
+#define VK_USE_PLATFORM_XLIB_KHR
 #define VK_USE_PLATFORM_WAYLAND_KHR
 #define VK_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -60,6 +63,13 @@ struct vkcube {
       xcb_atom_t atom_wm_protocols;
       xcb_atom_t atom_wm_delete_window;
    } xcb;
+
+   struct {
+      Display *display;
+      Window window;
+      Atom atom_wm_protocols;
+      Atom atom_wm_delete_window;
+   } xlib;
 
    struct {
       struct wl_display *display;

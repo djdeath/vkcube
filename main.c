@@ -65,6 +65,7 @@ enum display_mode {
    DISPLAY_MODE_KMS,
    DISPLAY_MODE_WAYLAND,
    DISPLAY_MODE_XCB,
+   DISPLAY_MODE_XLIB,
 };
 
 static enum display_mode display_mode = DISPLAY_MODE_AUTO;
@@ -963,6 +964,193 @@ mainloop_xcb(struct vkcube *vc)
    }
 }
 
+/* Xlib display code */
+
+#include <X11/Xatom.h>
+#include <X11/Xutil.h>
+
+static int
+init_xlib(struct vkcube *vc)
+{
+   static const char title[] = "Vulkan Cube";
+   XVisualInfo visinfo_template;
+   int template_mask = 0;
+   XVisualInfo *visinfo = NULL;
+   int visinfos_count;
+   XSetWindowAttributes attrs;
+
+   vc->xlib.display = XOpenDisplay(NULL);
+   if (!vc->xlib.display)
+      return -1;
+
+   visinfo_template.screen = DefaultScreen(vc->xlib.display);
+   template_mask |= VisualScreenMask;
+
+   visinfo = XGetVisualInfo(vc->xlib.display,
+                            template_mask,
+                            &visinfo_template,
+                            &visinfos_count);
+
+   attrs.override_redirect = True;
+   attrs.colormap = XCreateColormap(vc->xlib.display,
+                                    DefaultRootWindow(vc->xlib.display),
+                                    visinfo->visual,
+                                    AllocNone);
+   attrs.border_pixel = 0;
+
+   vc->xlib.window =
+      XCreateWindow (vc->xlib.display,
+                     DefaultRootWindow(vc->xlib.display),
+                     0, 0, vc->width, vc->height,
+                     0,
+                     visinfo->depth,
+                     CopyFromParent,
+                     visinfo->visual,
+                     CWOverrideRedirect | CWColormap | CWBorderPixel,
+                     &attrs);
+
+   vc->xlib.atom_wm_protocols = XInternAtom(vc->xlib.display, "WM_PROTOCOLS", True);
+   vc->xlib.atom_wm_delete_window = XInternAtom(vc->xlib.display, "WM_DELETE_WINDOW", True);
+
+   XChangeProperty(vc->xlib.display, vc->xlib.window,
+                   XInternAtom(vc->xlib.display, "_NET_WM_NAME", True),
+                   XInternAtom(vc->xlib.display, "UTF8_STRING", True), 8,
+                   PropModeReplace, (unsigned char *) title, strlen(title));
+
+   XChangeProperty(vc->xlib.display, vc->xlib.window,
+                   vc->xlib.atom_wm_protocols,
+                   XA_ATOM, 32,
+                   PropModeReplace, (unsigned char *) &vc->xlib.atom_wm_delete_window, 1);
+
+   XMapWindow(vc->xlib.display, vc->xlib.window);
+
+   XFlush(vc->xlib.display);
+
+   init_vk(vc, VK_KHR_XCB_SURFACE_EXTENSION_NAME);
+
+   PFN_vkGetPhysicalDeviceXlibPresentationSupportKHR get_xlib_presentation_support =
+      (PFN_vkGetPhysicalDeviceXlibPresentationSupportKHR)
+      vkGetInstanceProcAddr(vc->instance, "vkGetPhysicalDeviceXlibPresentationSupportKHR");
+   PFN_vkCreateXlibSurfaceKHR create_xlib_surface =
+      (PFN_vkCreateXlibSurfaceKHR)
+      vkGetInstanceProcAddr(vc->instance, "vkCreateXlibSurfaceKHR");
+
+   if (!get_xlib_presentation_support(vc->physical_device, 0,
+                                      vc->xlib.display,
+                                      XVisualIDFromVisual(XDefaultVisual(vc->xlib.display, XDefaultScreen(vc->xlib.display))))) {
+      fail("Vulkan not supported on given X window");
+   }
+
+   create_xlib_surface(vc->instance,
+      &(VkXlibSurfaceCreateInfoKHR) {
+         .sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
+         .dpy = vc->xlib.display,
+         .window = vc->xlib.window,
+      }, NULL, &vc->surface);
+
+   vc->image_format = choose_surface_format(vc);
+
+   init_vk_objects(vc);
+
+   vc->image_count = 0;
+
+   return 0;
+}
+
+static void
+schedule_xlib_repaint(struct vkcube *vc)
+{
+   XEvent xev;
+
+   memset(&xev, 0, sizeof(xev));
+   xev.type = ClientMessage;
+   xev.xclient.format = 32;
+   xev.xclient.window = vc->xlib.window;
+   xev.xclient.message_type = XA_NOTICE;
+
+   XSendEvent(vc->xlib.display,
+              vc->xlib.window,
+              False,
+              SubstructureRedirectMask | SubstructureNotifyMask,
+              &xev);
+}
+
+static void
+mainloop_xlib(struct vkcube *vc)
+{
+   while (1) {
+      XEvent xev;
+      bool repaint = false;
+      while (XNextEvent(vc->xlib.display, &xev)) {
+         switch (xev.type) {
+         case ClientMessage:
+            if (xev.xclient.window != vc->xlib.window)
+               break;
+
+            if (xev.xclient.message_type == vc->xlib.atom_wm_protocols &&
+                xev.xclient.data.l[0] == vc->xlib.atom_wm_delete_window) {
+               exit(0);
+            }
+
+            if (xev.xclient.message_type == XA_NOTICE)
+               repaint = true;
+            break;
+
+         case ConfigureNotify:
+            if (vc->width != xev.xconfigure.width ||
+                vc->height != xev.xconfigure.height) {
+               if (vc->image_count > 0) {
+                  vkDestroySwapchainKHR(vc->device, vc->swap_chain, NULL);
+                  vc->image_count = 0;
+               }
+
+               vc->width = xev.xconfigure.width;
+               vc->height = xev.xconfigure.height;
+            }
+            break;
+
+         case Expose:
+            schedule_xcb_repaint(vc);
+            break;
+
+         case KeyPress:
+            if (xev.xkey.keycode == 9)
+               exit(0);
+
+            break;
+         }
+
+         /* event = xcb_poll_for_event(vc->xcb.conn); */
+      }
+
+      if (repaint) {
+         if (vc->image_count == 0)
+            create_swapchain(vc);
+
+         uint32_t index;
+         vkAcquireNextImageKHR(vc->device, vc->swap_chain, 60,
+                               vc->semaphore, VK_NULL_HANDLE, &index);
+
+         assert(index <= MAX_NUM_IMAGES);
+         vc->model.render(vc, &vc->buffers[index]);
+
+         VkResult result;
+         vkQueuePresentKHR(vc->queue,
+             &(VkPresentInfoKHR) {
+                .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+                .swapchainCount = 1,
+                .pSwapchains = (VkSwapchainKHR[]) { vc->swap_chain, },
+                .pImageIndices = (uint32_t[]) { index, },
+                .pResults = &result,
+             });
+
+         vkQueueWaitIdle(vc->queue);
+
+         schedule_xlib_repaint(vc);
+      }
+   }
+}
+
 /* Wayland display code - render to Wayland window */
 
 static void
@@ -1244,6 +1432,9 @@ display_mode_from_string(const char *s, enum display_mode *mode)
    } else if (streq(s, "xcb")) {
       *mode = DISPLAY_MODE_XCB;
       return true;
+   } else if (streq(s, "xlib")) {
+      *mode = DISPLAY_MODE_XLIB;
+      return true;
    } else {
       return false;
    }
@@ -1375,6 +1566,10 @@ init_display(struct vkcube *vc)
       if (init_xcb(vc) == -1)
          fail("failed to initialize xcb");
       break;
+   case DISPLAY_MODE_XLIB:
+      if (init_xlib(vc) == -1)
+         fail("failed to initialize xlib");
+      break;
    }
 }
 
@@ -1390,6 +1585,9 @@ mainloop(struct vkcube *vc)
       break;
    case DISPLAY_MODE_XCB:
       mainloop_xcb(vc);
+      break;
+   case DISPLAY_MODE_XLIB:
+      mainloop_xlib(vc);
       break;
    case DISPLAY_MODE_KMS:
       mainloop_vt(vc);
