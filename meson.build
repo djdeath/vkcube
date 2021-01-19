@@ -30,6 +30,26 @@ vkcube_files = files(
   'esUtil.h'
 )
 
+if get_option('wayland-protected')
+  dep_wl_scanner = dependency('wayland-scanner', native: true)
+  prog_wl_scanner = find_program(dep_wl_scanner.get_pkgconfig_variable('wayland_scanner'))
+
+  vkcube_files += custom_target(
+    'weston-content-protection.h',
+    input : 'weston-content-protection.xml',
+    output : 'weston-content-protection.h',
+    command : [prog_wl_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+  )
+  vkcube_files += custom_target(
+    'weston-content-protection.c',
+    input : 'weston-content-protection.xml',
+    output : 'weston-content-protection.c',
+    command : [prog_wl_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+  )
+
+  defs += '-DHAVE_WESTON_PROTECTED_PROTOCOL'
+endif
+
 if prog_glslc.found()
   gen = generator(
     prog_glslc,

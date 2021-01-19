@@ -71,6 +71,9 @@ enum display_mode {
 static enum display_mode display_mode = DISPLAY_MODE_AUTO;
 static const char *arg_out_file = "./cube.png";
 static bool protected_chain = false;
+#ifdef HAVE_WESTON_PROTECTED_PROTOCOL
+static bool protected_wayland = false;
+#endif
 
 void noreturn
 failv(const char *format, va_list args)
@@ -1138,6 +1141,12 @@ registry_handle_global(void *data, struct wl_registry *registry,
    } else if (strcmp(interface, "wl_seat") == 0) {
       vc->wl.seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
       wl_seat_add_listener(vc->wl.seat, &wl_seat_listener, vc);
+#ifdef HAVE_WESTON_PROTECTED_PROTOCOL
+   } else if (strcmp(interface, "weston_content_protection") == 0) {
+      vc->wl.protection = wl_registry_bind(registry, name,
+                                           &weston_content_protection_interface,
+                                           1);
+#endif
    }
 }
 
@@ -1174,6 +1183,23 @@ init_wayland(struct vkcube *vc)
    wl_registry_destroy(registry);
 
    vc->wl.surface = wl_compositor_create_surface(vc->wl.compositor);
+
+#ifdef HAVE_WESTON_PROTECTED_PROTOCOL
+   if (vc->wl.protection) {
+      vc->wl.protected_surface =
+         weston_content_protection_get_protection(vc->wl.protection,
+                                                  vc->wl.surface);
+   }
+
+   if (protected_wayland) {
+      if (vc->wl.protected_surface) {
+         weston_protected_surface_set_type(vc->wl.protected_surface,
+                                           WESTON_PROTECTED_SURFACE_TYPE_HDCP_1);
+      } else {
+         fail("Unable to set wayland surface protected.");
+      }
+   }
+#endif
 
    if (!vc->wl.shell)
       fail("Compositor is missing xdg_wm_base protocol support");
@@ -1550,6 +1576,9 @@ print_usage(FILE *f)
       "                          Default is \"./cube.png\".\n"
       "\n"
       "  -p                      Attempt to use protected content (encrypted).\n"
+      "\n"
+      "  -w                      Attempt to signal protected content (encrypted)\n"
+      "                          through wayland extensions (normally requires -p).\n"
       ;
 
    fprintf(f, "%s", usage);
@@ -1580,7 +1609,11 @@ parse_args(int argc, char *argv[])
     * The initial ':' in the optstring makes getopt return ':' when an option
     * is missing a required argument.
     */
-   static const char *optstring = "+:nm:o:k:p";
+   static const char *optstring = "+:nm:o:k:p"
+#ifdef HAVE_WESTON_PROTECTED_PROTOCOL
+      "w"
+#endif
+      ;
 
    int opt;
    bool found_arg_headless = false;
@@ -1616,6 +1649,11 @@ parse_args(int argc, char *argv[])
       case 'p':
          protected_chain = true;
          break;
+#ifdef HAVE_WESTON_PROTECTED_PROTOCOL
+      case 'w':
+         protected_wayland = true;
+         break;
+#endif
       case '?':
          usage_error("invalid option '-%c'", optopt);
          break;
@@ -1712,6 +1750,8 @@ mainloop(struct vkcube *vc)
 int main(int argc, char *argv[])
 {
    struct vkcube vc;
+
+   memset(&vc, 0, sizeof(vc));
 
    parse_args(argc, argv);
 

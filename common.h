@@ -15,6 +15,10 @@
 #include <wayland-client.h>
 #include <xdg-shell-protocol.h>
 
+#ifdef HAVE_WESTON_PROTECTED_PROTOCOL
+#include "weston-content-protection.h"
+#endif
+
 #define VK_USE_PLATFORM_XCB_KHR
 #define VK_USE_PLATFORM_WAYLAND_KHR
 #define VK_PROTOTYPES
@@ -72,6 +76,10 @@ struct vkcube {
       struct wl_surface *surface;
       struct xdg_surface *xdg_surface;
       struct xdg_toplevel *xdg_toplevel;
+#ifdef HAVE_WESTON_PROTECTED_PROTOCOL
+      struct weston_content_protection *protection;
+      struct weston_protected_surface *protected_surface;
+#endif
       bool wait_for_configure;
    } wl;
 

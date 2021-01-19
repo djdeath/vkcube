@@ -1,0 +1,6 @@
+option(
+  'wayland-protected',
+  type : 'boolean',
+  value : false,
+  description : 'Build wayland protected content support',
+)
